@@ -14,19 +14,8 @@ set_n_least_used_CUDA_VISIBLE_DEVICES() {
 }
 
 set_n_least_used_CUDA_VISIBLE_DEVICES 1
-# export CUDA_VISIBLE_DEVICES="4,5,6,7"
-
-torchrun --standalone --nproc_per_node=1 train_sft_mem.py \
-    --pretrain "/data3/data/SFT_improvement/LLaMa-7B/" \
-    --model 'llama' \
-    --strategy colossalai_zero2_cpu \
-    --log_interval 10 \
-    --save_path  "/data3/data/SFT_improvement/Coati-SFT-v2-433k" \
-    --dataset "/data/users/lcxyc/improve_sft/final/final_dataset.json" \
-    --batch_size 4 \
-    --accumulation_steps 8 \
-    --lr "5e-6" \
-    --grad_checkpoint \
-    --max_len 2048 \
-    --use_wandb \
-    --max_epochs 3 \
+# export CUDA_VISIBLE_DEVICES="3"
+python chat_infer.py \
+    --model_path "/data3/data/SFT_improvement/Coati-SFT-v2-433k-epoch2-3-steps-6.77k/" \
+    --model_max_length 2048 \
+    --max_new_tokens 512 \

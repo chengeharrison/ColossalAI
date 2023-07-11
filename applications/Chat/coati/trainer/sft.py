@@ -36,6 +36,8 @@ class SFTTrainer(Trainer):
     def __init__(
         self,
         model,
+        save_path,
+        tokenizer,
         strategy: Strategy,
         optim: Optimizer,
         train_dataloader: DataLoader,
@@ -51,6 +53,9 @@ class SFTTrainer(Trainer):
         self.eval_dataloader = eval_dataloader
         self.model = model
         self.optimizer = optim
+        self.loss_mean = torch.tensor([1000]).cuda()
+        self.save_path=save_path
+        self.tokenizer=tokenizer
 
         self.accumulation_steps = accumulation_steps
         num_update_steps_per_epoch = len(train_dataloader) // self.accumulation_steps
@@ -63,7 +68,7 @@ class SFTTrainer(Trainer):
 
     def fit(self, logger, use_wandb: bool = False):
         if use_wandb:
-            wandb.init(project="Coati", name=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+            wandb.init(project="Coati", group="433k", name=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
             wandb.watch(self.model)
         total_loss = 0
         # epoch_bar = tqdm(range(self.epochs), desc='Epochs', disable=not is_rank_0())
@@ -79,6 +84,7 @@ class SFTTrainer(Trainer):
 
                 batch = to_device(batch, torch.cuda.current_device())
                 outputs = self.model(batch["input_ids"], attention_mask=batch["attention_mask"], labels=batch["labels"])
+                # outputs = self.model(torch.zeros(size=(batch['input_ids'].size(0),2048), dtype=torch.long).to(torch.cuda.current_device()), attention_mask=torch.zeros(size=(batch['input_ids'].size(0),2048), dtype=torch.bool).to(torch.cuda.current_device()), labels=torch.zeros(size=(batch['input_ids'].size(0),2048), dtype=torch.long).to(torch.cuda.current_device()))
 
                 loss = outputs.loss
 
@@ -90,19 +96,25 @@ class SFTTrainer(Trainer):
                 self.strategy.backward(loss, self.model, self.optimizer)
 
                 total_loss += loss.item()
+                
+                # wandb_total_loss = torch.tensor(total_loss).cuda()
 
                 # gradient accumulation
                 if (batch_id + 1) % self.accumulation_steps == 0:
                     self.strategy.optimizer_step(self.optimizer)
                     self.optimizer.zero_grad()
                     self.scheduler.step()
-                    if is_rank_0() and use_wandb:
+                    if use_wandb:
+                        # dist.all_reduce(wandb_total_loss, op=torch.distributed.ReduceOp.SUM)
+                        # wandb_total_loss = wandb_total_loss/dist.get_world_size()
+                        
                         wandb.log({
                             "loss": total_loss / self.accumulation_steps,
                             "lr": self.scheduler.get_last_lr()[0],
                             "epoch": epoch,
                             "batch_id": batch_id
                         })
+                        
                     total_loss = 0
                     step_bar.update()
 
@@ -129,7 +141,26 @@ class SFTTrainer(Trainer):
                         num_seen += batch["input_ids"].size(0)
 
                     loss_mean = loss_sum / num_seen
-                    if dist.get_rank() == 0:
-                        logger.info(f'Eval Epoch {epoch}/{self.max_epochs} loss {loss_mean}')
+                    # if dist.get_rank() == 0:
+                    # logger.info(f'Eval Epoch {epoch}/{self.max_epochs} loss {loss_mean}')
+                    
+                    loss_mean = torch.tensor(loss_mean).cuda()
+                    
+                    dist.all_reduce(loss_mean, op=torch.distributed.ReduceOp.SUM)
+                    loss_mean = loss_mean / dist.get_world_size()
+                    
+                    # save_steps = len(self.train_dataloader) // self.accumulation_steps * (epoch+1) / 1000
+                    # if dist.get_rank() == 0 and self.max_epochs > 5 and loss_mean < self.loss_mean :
+                    #     logger.info(f'Eval Epoch {epoch+1}/{self.max_epochs} loss {loss_mean}')
+                    #     self.loss_mean = loss_mean
+                    #     self.strategy.save_pretrained(self.model, path=self.save_path + f"-epoch{epoch+1}-{self.max_epochs}-steps-{save_steps}k", only_rank0=True, tokenizer=self.tokenizer)
+                    # elif dist.get_rank() == 0 and self.max_epochs <= 5:
+                    #     logger.info(f'Eval Epoch {epoch+1}/{self.max_epochs} loss {loss_mean}')
+                    #     self.loss_mean = loss_mean
+                    #     self.strategy.save_pretrained(self.model, path=self.save_path + f"-epoch{epoch+1}-{self.max_epochs}-steps-{save_steps}k", only_rank0=True, tokenizer=self.tokenizer)
+            
+            if dist.get_rank() == 0:
+                save_steps = len(self.train_dataloader) // self.accumulation_steps * (epoch+1) / 1000
+                self.strategy.save_pretrained(self.model, path=self.save_path + f"-epoch{epoch+1}-{self.max_epochs}-steps-{save_steps}k", only_rank0=True, tokenizer=self.tokenizer)
 
             # epoch_bar.update()

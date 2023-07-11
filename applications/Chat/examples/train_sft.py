@@ -52,7 +52,7 @@ def train(args):
         elif args.model == 'gpt2':
             model = convert_to_lora_module(GPT2LMHeadModel.from_pretrained(args.pretrain), args.lora_rank).half().cuda()
         elif args.model == 'llama':
-            model = convert_to_lora_module(LlamaForCausalLM.from_pretrained(args.pretrain),
+            model = convert_to_lora_module(LlamaForCausalLM.from_pretrained(args.pretrain, use_cache=False),
                                            args.lora_rank).half().cuda()
         else:
             raise ValueError(f'Unsupported model "{args.model}"')
@@ -73,11 +73,13 @@ def train(args):
             args.pretrain,
             padding_side="right",
             use_fast=False,
+            model_max_length=2048,
         )
-        tokenizer.eos_token = '<\s>'
+        tokenizer.bos_token = '<s>'
+        tokenizer.eos_token = '</s>'
     else:
         raise ValueError(f'Unsupported model "{args.model}"')
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.pad_token = '<pad>'
     max_len = args.max_len
     if args.model == 'llama':
         tokenizer = prepare_llama_tokenizer_and_embedding(tokenizer, model)
@@ -115,7 +117,12 @@ def train(args):
                                           data_path=args.dataset,
                                           max_datasets_size=args.max_datasets_size,
                                           max_length=max_len)
-        eval_dataset = None
+        
+        eval_dataset = SupervisedDataset(tokenizer=tokenizer,
+                                          data_path=args.eval_dataset,
+                                          max_datasets_size=args.max_datasets_size,
+                                          max_length=max_len) if args.eval_dataset else None
+    
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
 
     if dist.is_initialized() and dist.get_world_size() > 1:
@@ -159,12 +166,14 @@ def train(args):
                          train_dataloader=train_dataloader,
                          eval_dataloader=eval_dataloader,
                          max_epochs=args.max_epochs,
-                         accumulation_steps=args.accumulation_steps)
+                         accumulation_steps=args.accumulation_steps,
+                         save_path=args.save_path,
+                         tokenizer=tokenizer)
 
     trainer.fit(logger=logger, use_wandb=args.use_wandb)
 
     # save model checkpoint after fitting on only rank0
-    strategy.save_pretrained(model, path=args.save_path, only_rank0=True, tokenizer=tokenizer)
+    # strategy.save_pretrained(model, path=args.save_path, only_rank0=True, tokenizer=tokenizer)
     # save optimizer checkpoint on all ranks
     if args.need_optim_ckpt:
         strategy.save_optimizer(trainer.optimizer,
@@ -180,6 +189,7 @@ if __name__ == '__main__':
     parser.add_argument('--model', choices=['gpt2', 'bloom', 'opt', 'llama'], default='bloom')
     parser.add_argument('--pretrain', type=str, default=None)
     parser.add_argument('--dataset', type=str, default=None)
+    parser.add_argument('--eval_dataset', type=str, default=None)
     parser.add_argument('--max_datasets_size', type=int, default=None)
     parser.add_argument('--save_path', type=str, default='output')
     parser.add_argument('--need_optim_ckpt', type=bool, default=False)

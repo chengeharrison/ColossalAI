@@ -25,11 +25,14 @@ from tqdm import tqdm
 
 from colossalai.logging import get_dist_logger
 
-from .utils import is_rank_0, jload
+from .utils import is_rank_0, jload, default_conversation
 
 logger = get_dist_logger()
 
 IGNORE_INDEX = -100
+DEFAULT_BOS_TOKEN = "<s>"
+DEFAULT_EOS_TOKEN = "</s>"
+
 PROMPT_DICT = {
     "prompt_input":
         ("Below is an instruction that describes a task, paired with an input that provides further context. "
@@ -113,29 +116,114 @@ def preprocess(
     return dict(input_ids=input_ids, labels=labels)
 
 
+def preprocess_conversation(
+        sources: Sequence[str],
+        tokenizer: transformers.PreTrainedTokenizer,
+        max_length: int
+) -> Dict:
+    # add end signal and concatenate together
+    conversations = []
+    intermediates = []
+    for source in sources:
+        header = f"{default_conversation.system}"
+        conversation, intermediate = _add_speaker_and_signal(header, source)
+        conversations.append(conversation)
+        intermediates.append(intermediate)
+
+    # tokenize conversations
+    conversations_tokenized = _tokenize_fn(conversations, tokenizer, max_length)
+    input_ids = conversations_tokenized["input_ids"]
+    targets = copy.deepcopy(input_ids)
+
+    # keep only machine responses as targets
+    assert len(targets) == len(intermediates)
+    for target, inters in zip(targets, intermediates):
+        mask = torch.zeros_like(target, dtype=torch.bool)
+        for inter in inters:
+            tokenized = _tokenize_fn(inter, tokenizer, max_length)
+            # print(inter[0])
+            # print(inter[1])
+            
+            start_idx = tokenized["input_ids"][0].size(0) - 1
+            end_idx = tokenized["input_ids"][1].size(0)
+            
+            # print(f"using start-1:end")
+            # print(tokenizer.decode(tokenized["input_ids"][1][start_idx-1:end_idx]))
+            
+            mask[start_idx:end_idx] = True
+        target[~mask] = IGNORE_INDEX
+        
+        # check correctness of masking
+        # z = target.clone()
+        # z = torch.where(z == IGNORE_INDEX, tokenizer.unk_token_id, z)
+        # print(tokenizer.decode(z))
+        
+    return dict(input_ids=input_ids, labels=targets)
+
+
+def _add_speaker_and_signal(header, source, get_conversation=True):
+    BEGIN_SIGNAL = DEFAULT_BOS_TOKEN
+    END_SIGNAL = DEFAULT_EOS_TOKEN
+    conversation = header
+    intermediate = []
+    for sentence in source:
+        from_str = sentence["from"]
+        if from_str.lower() == "human":
+            from_str = default_conversation.roles[0]
+        elif from_str.lower() == "gpt":
+            from_str = default_conversation.roles[1]
+        else:
+            from_str = 'unknown'
+
+        value = from_str + ": " + BEGIN_SIGNAL + sentence["value"] + END_SIGNAL
+        if sentence["from"].lower() == "gpt":
+            start = conversation + from_str + ": " + BEGIN_SIGNAL
+            end = conversation + value
+            intermediate.append([start, end])
+        if get_conversation:
+            conversation += value
+    return conversation, intermediate
+
+
 class SupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
 
     def __init__(self, data_path: str, tokenizer: transformers.PreTrainedTokenizer, max_datasets_size: int = None, max_length: int = 512):
         super(SupervisedDataset, self).__init__()
-        logger.info("Loading data...")
+        # logger.info("Loading data...")
         list_data_dict = jload(data_path)
-        logger.info(f"Loaded {len(list_data_dict)} examples.")
+        # logger.info(f"Loaded {len(list_data_dict)} examples.")
 
         if max_datasets_size is not None:
-            logger.info(f"Limiting dataset to {max_datasets_size} examples.")
+            if is_rank_0():
+                logger.info(f"Limiting dataset to {max_datasets_size} examples.")
             list_data_dict = list_data_dict[:max_datasets_size]
 
-        logger.info("Formatting inputs...")
-        prompt_input, prompt_no_input = PROMPT_DICT["prompt_input"], PROMPT_DICT["prompt_no_input"]
-        sources = [
-            prompt_input.format_map(example) if example.get("input", "") != "" else prompt_no_input.format_map(example)
-            for example in list_data_dict
-        ]
-        targets = [f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
-
-        logger.info("Tokenizing inputs... This may take some time...")
-        data_dict = preprocess(sources, targets, tokenizer, max_length)
+        # logger.info("Formatting inputs...")
+        if "conversations" not in list_data_dict[0]:
+            prompt_input, prompt_no_input = PROMPT_DICT["prompt_input"], PROMPT_DICT["prompt_no_input"]
+            sources = [
+                prompt_input.format_map(example) if example.get("input", "") != "" else prompt_no_input.format_map(example)
+                for example in list_data_dict
+            ]
+            targets = [f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
+            
+            if is_rank_0():
+                logger.info("Tokenizing inputs... This may take some time...")
+                
+            data_dict = preprocess(sources, targets, tokenizer, max_length)
+            
+            if is_rank_0():
+                logger.info("Tokenizing finish.")
+        else:
+            if is_rank_0():
+                logger.info("Tokenizing inputs... This may take some time...")
+                
+            sources = [conv["conversations"] for conv in list_data_dict]
+            data_dict = preprocess_conversation(sources, tokenizer, max_length)
+            
+            if is_rank_0():
+                logger.info("Tokenizing finish.")
 
         self.input_ids = data_dict["input_ids"]
         self.labels = data_dict["labels"]

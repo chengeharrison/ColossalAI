@@ -16,10 +16,10 @@ from typing import Dict
 
 import transformers
 
-DEFAULT_PAD_TOKEN = "[PAD]"
+DEFAULT_PAD_TOKEN = "<pad>"
 DEFAULT_EOS_TOKEN = "</s>"
-DEFAULT_BOS_TOKEN = "</s>"
-DEFAULT_UNK_TOKEN = "</s>"
+DEFAULT_BOS_TOKEN = "<s>"
+DEFAULT_UNK_TOKEN = "<unk>"
 
 
 def prepare_llama_tokenizer_and_embedding(

@@ -59,6 +59,6 @@ if __name__ == '__main__':
     parser.add_argument('--pretrain', type=str, default=None)
     parser.add_argument('--model_path', type=str, default=None)
     parser.add_argument('--input', type=str, default='Question: How are you ? Answer:')
-    parser.add_argument('--max_length', type=int, default=100)
+    parser.add_argument('--max_length', type=int, default=512)
     args = parser.parse_args()
     eval(args)
